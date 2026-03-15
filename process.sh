@@ -3,24 +3,24 @@ set -e
 
 BASE_DATE="${BASE_DATE:-2000-01-01 00:00:00}"
 INCREMENT_SECONDS="${INCREMENT_SECONDS:-1}"
-RECURSIVE="${RECURSIVE:-false}"
+RECURSIVE="${RECURSIVE:-true}"
 DRY_RUN="${DRY_RUN:-false}"
 EXTENSIONS="${EXTENSIONS:-jpg,jpeg,png,gif,mp4,mov,heic}"
 DATA_DIR="/data"
 
-# Build find -name filter from EXTENSIONS
-build_name_filter() {
-  filter=""
+# Build a case-insensitive regex pattern from EXTENSIONS for grep
+build_ext_regex() {
+  regex=""
   IFS=','
   for ext in $EXTENSIONS; do
     ext=$(echo "$ext" | tr -d ' ')
-    if [ -n "$filter" ]; then
-      filter="$filter -o"
+    if [ -n "$regex" ]; then
+      regex="$regex|"
     fi
-    filter="$filter -iname *.${ext}"
+    regex="$regex${ext}"
   done
   unset IFS
-  echo "$filter"
+  echo "\\.(${regex})$"
 }
 
 # Convert "YYYY-MM-DD HH:MM:SS" to epoch seconds
@@ -38,10 +38,10 @@ process_directory() {
   dir="$1"
   echo "--- Processing directory: ${dir} ---"
 
-  name_filter=$(build_name_filter)
+  ext_regex=$(build_ext_regex)
 
-  # Find files in this directory only (maxdepth 1), sort naturally by filename
-  file_list=$(eval "find \"$dir\" -maxdepth 1 -type f \( $name_filter \)" 2>/dev/null | sort -V)
+  # Find files in this directory only (maxdepth 1), filter by extension, sort naturally
+  file_list=$(find "$dir" -maxdepth 1 -type f 2>/dev/null | grep -iE "$ext_regex" | sort -V)
 
   if [ -z "$file_list" ]; then
     echo "  (no matching files)"
@@ -54,12 +54,24 @@ process_directory() {
     exit 1
   fi
 
+  stats_file=$(mktemp)
+  echo "0 0" > "$stats_file"
+
   echo "$file_list" | while IFS= read -r filepath; do
     filename=$(basename "$filepath")
     exif_ts=$(epoch_to_exif "$current_epoch")
 
+    # Check if DateTimeOriginal already matches expected timestamp
+    current_dto=$(exiftool -s3 -DateTimeOriginal "$filepath" 2>/dev/null)
+    if [ "$current_dto" = "$exif_ts" ]; then
+      read updated skipped < "$stats_file"
+      echo "$updated $((skipped + 1))" > "$stats_file"
+      current_epoch=$((current_epoch + INCREMENT_SECONDS))
+      continue
+    fi
+
     if [ "$DRY_RUN" = "true" ]; then
-      echo "  [DRY-RUN] $filename -> $exif_ts"
+      echo "  [DRY-RUN] $filename -> $exif_ts (was: ${current_dto:-none})"
     else
       exiftool -overwrite_original \
         -DateTimeOriginal="$exif_ts" \
@@ -69,8 +81,14 @@ process_directory() {
       echo "  $filename -> $exif_ts"
     fi
 
+    read updated skipped < "$stats_file"
+    echo "$((updated + 1)) $skipped" > "$stats_file"
     current_epoch=$((current_epoch + INCREMENT_SECONDS))
   done
+
+  read updated skipped < "$stats_file"
+  rm -f "$stats_file"
+  echo "  (updated: $updated, skipped: $skipped)"
 }
 
 # --- Main ---
