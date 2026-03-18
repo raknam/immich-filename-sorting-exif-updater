@@ -88,7 +88,11 @@ process_directory() {
   done
 
   # Batch write: one exiftool call for all pending updates
-  updated=$(grep -c '^-execute$' "$write_argfile" 2>/dev/null || echo 0)
+  if [ -s "$write_argfile" ]; then
+    updated=$(grep -c '^-execute$' "$write_argfile")
+  else
+    updated=0
+  fi
   total=$(echo "$file_list" | wc -l)
   skipped=$((total - updated))
 
