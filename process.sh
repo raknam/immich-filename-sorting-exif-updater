@@ -54,45 +54,44 @@ process_directory() {
     exit 1
   fi
 
-  # Read all current DateTimeOriginal values in one exiftool call (tab-separated: FileName\tDateTimeOriginal)
+  # Batch read: one exiftool call for all timestamps in this directory
   dto_map=$(mktemp)
   exiftool -T -FileName -DateTimeOriginal "$dir" 2>/dev/null > "$dto_map"
 
-  stats_file=$(mktemp)
-  echo "0 0" > "$stats_file"
+  # CSV for batch write: accumulate all files needing update
+  updates_csv=$(mktemp)
+  printf 'SourceFile,DateTimeOriginal,CreateDate,ModifyDate\n' > "$updates_csv"
 
   echo "$file_list" | while IFS= read -r filepath; do
     filename=$(basename "$filepath")
     exif_ts=$(epoch_to_exif "$current_epoch")
 
-    # Exact filename match in dto_map (field 1 = filename, field 2 = DateTimeOriginal)
+    # Exact filename lookup in batch read map
     current_dto=$(awk -F'\t' -v fn="$filename" '$1 == fn { print $2 }' "$dto_map")
 
-    if [ "$current_dto" = "$exif_ts" ]; then
-      read updated skipped < "$stats_file"
-      echo "$updated $((skipped + 1))" > "$stats_file"
-      current_epoch=$((current_epoch + INCREMENT_SECONDS))
-      continue
+    if [ "$current_dto" != "$exif_ts" ]; then
+      # Queue for batch write (used for counting in dry-run too)
+      printf '"%s","%s","%s","%s"\n' "$filepath" "$exif_ts" "$exif_ts" "$exif_ts" >> "$updates_csv"
+      if [ "$DRY_RUN" = "true" ]; then
+        echo "  [DRY-RUN] $filename -> $exif_ts (was: ${current_dto:-none})"
+      else
+        echo "  $filename -> $exif_ts"
+      fi
     fi
 
-    if [ "$DRY_RUN" = "true" ]; then
-      echo "  [DRY-RUN] $filename -> $exif_ts (was: ${current_dto:-none})"
-    else
-      exiftool -overwrite_original \
-        -DateTimeOriginal="$exif_ts" \
-        -CreateDate="$exif_ts" \
-        -ModifyDate="$exif_ts" \
-        "$filepath" > /dev/null 2>&1
-      echo "  $filename -> $exif_ts"
-    fi
-
-    read updated skipped < "$stats_file"
-    echo "$((updated + 1)) $skipped" > "$stats_file"
     current_epoch=$((current_epoch + INCREMENT_SECONDS))
   done
 
-  read updated skipped < "$stats_file"
-  rm -f "$stats_file" "$dto_map"
+  # Batch write: one exiftool call for all pending updates
+  updated=$(( $(wc -l < "$updates_csv") - 1 ))
+  total=$(echo "$file_list" | wc -l)
+  skipped=$((total - updated))
+
+  if [ "$DRY_RUN" != "true" ] && [ "$updated" -gt 0 ]; then
+    exiftool -overwrite_original -csv="$updates_csv" > /dev/null 2>&1
+  fi
+
+  rm -f "$dto_map" "$updates_csv"
   echo "  (updated: $updated, skipped: $skipped)"
 }
 
