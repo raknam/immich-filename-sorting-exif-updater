@@ -54,13 +54,17 @@ process_directory() {
     exit 1
   fi
 
-  # Batch read: one exiftool call for all timestamps in this directory
+  # Batch read: one exiftool call for all files in this directory.
+  # Use argfile so filenames with special characters are handled safely.
+  read_argfile=$(mktemp)
+  printf -- '-T\n-FileName\n-DateTimeOriginal\n' > "$read_argfile"
+  echo "$file_list" >> "$read_argfile"
   dto_map=$(mktemp)
-  exiftool -T -FileName -DateTimeOriginal "$dir" 2>/dev/null > "$dto_map"
+  exiftool -@ "$read_argfile" 2>/dev/null > "$dto_map" || true
+  rm -f "$read_argfile"
 
-  # CSV for batch write: accumulate all files needing update
-  updates_csv=$(mktemp)
-  printf 'SourceFile,DateTimeOriginal,CreateDate,ModifyDate\n' > "$updates_csv"
+  # Argfile for batch write: one block per file needing update
+  write_argfile=$(mktemp)
 
   echo "$file_list" | while IFS= read -r filepath; do
     filename=$(basename "$filepath")
@@ -70,8 +74,9 @@ process_directory() {
     current_dto=$(awk -F'\t' -v fn="$filename" '$1 == fn { print $2 }' "$dto_map")
 
     if [ "$current_dto" != "$exif_ts" ]; then
-      # Queue for batch write (used for counting in dry-run too)
-      printf '"%s","%s","%s","%s"\n' "$filepath" "$exif_ts" "$exif_ts" "$exif_ts" >> "$updates_csv"
+      # Queue for batch write — each argument on its own line, no quoting needed
+      printf -- '-overwrite_original\n-DateTimeOriginal=%s\n-CreateDate=%s\n-ModifyDate=%s\n%s\n-execute\n' \
+        "$exif_ts" "$exif_ts" "$exif_ts" "$filepath" >> "$write_argfile"
       if [ "$DRY_RUN" = "true" ]; then
         echo "  [DRY-RUN] $filename -> $exif_ts (was: ${current_dto:-none})"
       else
@@ -83,15 +88,15 @@ process_directory() {
   done
 
   # Batch write: one exiftool call for all pending updates
-  updated=$(( $(wc -l < "$updates_csv") - 1 ))
+  updated=$(grep -c '^-execute$' "$write_argfile" 2>/dev/null || echo 0)
   total=$(echo "$file_list" | wc -l)
   skipped=$((total - updated))
 
   if [ "$DRY_RUN" != "true" ] && [ "$updated" -gt 0 ]; then
-    exiftool -overwrite_original -csv="$updates_csv" > /dev/null 2>&1
+    exiftool -@ "$write_argfile" > /dev/null 2>&1
   fi
 
-  rm -f "$dto_map" "$updates_csv"
+  rm -f "$dto_map" "$write_argfile"
   echo "  (updated: $updated, skipped: $skipped)"
 }
 
