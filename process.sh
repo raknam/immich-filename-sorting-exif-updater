@@ -41,7 +41,7 @@ process_directory() {
   ext_regex=$(build_ext_regex)
 
   # Find files in this directory only (maxdepth 1), filter by extension, sort naturally
-  file_list=$(find "$dir" -maxdepth 1 -type f 2>/dev/null | grep -iE "$ext_regex" | sort -V)
+  file_list=$(find "$dir" -maxdepth 1 -type f 2>/dev/null | grep -iE "$ext_regex" | sort -V || true)
 
   if [ -z "$file_list" ]; then
     echo "  (no matching files)"
