@@ -54,6 +54,10 @@ process_directory() {
     exit 1
   fi
 
+  # Read all current DateTimeOriginal values in one exiftool call (tab-separated: FileName\tDateTimeOriginal)
+  dto_map=$(mktemp)
+  exiftool -T -FileName -DateTimeOriginal "$dir" 2>/dev/null > "$dto_map"
+
   stats_file=$(mktemp)
   echo "0 0" > "$stats_file"
 
@@ -61,8 +65,9 @@ process_directory() {
     filename=$(basename "$filepath")
     exif_ts=$(epoch_to_exif "$current_epoch")
 
-    # Check if DateTimeOriginal already matches expected timestamp
-    current_dto=$(exiftool -s3 -DateTimeOriginal "$filepath" 2>/dev/null)
+    # Exact filename match in dto_map (field 1 = filename, field 2 = DateTimeOriginal)
+    current_dto=$(awk -F'\t' -v fn="$filename" '$1 == fn { print $2 }' "$dto_map")
+
     if [ "$current_dto" = "$exif_ts" ]; then
       read updated skipped < "$stats_file"
       echo "$updated $((skipped + 1))" > "$stats_file"
@@ -87,8 +92,18 @@ process_directory() {
   done
 
   read updated skipped < "$stats_file"
-  rm -f "$stats_file"
+  rm -f "$stats_file" "$dto_map"
   echo "  (updated: $updated, skipped: $skipped)"
+}
+
+# Depth-first traversal: process current dir, then recurse into subdirs one at a time
+process_tree() {
+  process_directory "$1"
+  if [ "$RECURSIVE" = "true" ]; then
+    find "$1" -mindepth 1 -maxdepth 1 -type d | sort -V | while IFS= read -r subdir; do
+      process_tree "$subdir"
+    done
+  fi
 }
 
 # --- Main ---
@@ -105,16 +120,7 @@ if [ ! -d "$DATA_DIR" ]; then
   exit 1
 fi
 
-if [ "$RECURSIVE" = "true" ]; then
-  # Process each subdirectory independently (each gets its own sequence starting at BASE_DATE)
-  # Process root directory first, then subdirectories in sorted order
-  process_directory "$DATA_DIR"
-  find "$DATA_DIR" -mindepth 1 -type d | sort -V | while IFS= read -r subdir; do
-    process_directory "$subdir"
-  done
-else
-  process_directory "$DATA_DIR"
-fi
+process_tree "$DATA_DIR"
 
 echo ""
 echo "=== Done ==="
